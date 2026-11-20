@@ -1,5 +1,6 @@
 package dev.lunivex.asterdium.smoke;
 
+import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import org.lwjgl.PointerBuffer;
@@ -10,24 +11,53 @@ import org.lwjgl.vulkan.*;
 import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.glfw.GLFWVulkan.*;
 import static org.lwjgl.system.MemoryUtil.NULL;
+import static org.lwjgl.util.shaderc.Shaderc.*;
 import static org.lwjgl.vulkan.KHRSurface.*;
 import static org.lwjgl.vulkan.KHRSwapchain.*;
 import static org.lwjgl.vulkan.VK10.*;
 
 /**
- * Asterdium 0.0.2: an isolated, shader-free, Vulkan presentation smoke test.
+ * Asterdium 0.0.3: an isolated Vulkan graphics-pipeline triangle test.
  * Nothing in this class is invoked by the Fabric Minecraft mod.
  *
- * The frame is produced by clearing a swapchain image with a Vulkan transfer
- * operation when the Windows surface supports it (render-pass fallback).
- * This intentionally does not render Minecraft geometry or measure Minecraft FPS.
+ * The default mode draws one colored triangle on the proven teal background.
+ * Set ASTERDIUM_RENDER_MODE=clear to keep the original 0.0.2 clear-only test
+ * available when debugging drivers or presentation. Neither mode renders
+ * Minecraft geometry or measures Minecraft FPS.
  */
 public final class VulkanSmoke implements AutoCloseable {
     private static final int WIDTH = 960;
     private static final int HEIGHT = 540;
     // An infinite wait hides GPU/WSI failures behind a white "Not Responding" window.
     private static final long FRAME_WAIT_NANOSECONDS = 2_000_000_000L;
+    private static final String TRIANGLE_VERTEX_SHADER = """
+            #version 450
+            layout(location = 0) out vec3 vertexColor;
+            void main() {
+                vec2 positions[3] = vec2[](
+                    vec2( 0.00, -0.68),
+                    vec2( 0.72,  0.58),
+                    vec2(-0.72,  0.58)
+                );
+                vec3 colors[3] = vec3[](
+                    vec3(0.08, 0.95, 0.92),
+                    vec3(0.33, 0.54, 1.00),
+                    vec3(0.91, 0.36, 0.95)
+                );
+                gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+                vertexColor = colors[gl_VertexIndex];
+            }
+            """;
+    private static final String TRIANGLE_FRAGMENT_SHADER = """
+            #version 450
+            layout(location = 0) in vec3 vertexColor;
+            layout(location = 0) out vec4 fragmentColor;
+            void main() {
+                fragmentColor = vec4(vertexColor, 1.0);
+            }
+            """;
 
+    private final boolean drawTriangle = !"clear".equalsIgnoreCase(System.getenv("ASTERDIUM_RENDER_MODE"));
     private long window;
     private boolean glfwReady;
     private boolean vulkanReady;
@@ -50,6 +80,8 @@ public final class VulkanSmoke implements AutoCloseable {
     private long[] imageViews;
     private long[] framebuffers;
     private long renderPass;
+    private long pipelineLayout;
+    private long trianglePipeline;
     private long commandPool;
     private VkCommandBuffer[] commandBuffers;
     private long imageAvailable;
@@ -85,7 +117,9 @@ public final class VulkanSmoke implements AutoCloseable {
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         // A fixed-size smoke test avoids pretending we have swapchain recreation yet.
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-        window = glfwCreateWindow(WIDTH, HEIGHT, "Asterdium 0.0.2 - Vulkan clear", NULL, NULL);
+        window = glfwCreateWindow(WIDTH, HEIGHT,
+                drawTriangle ? "Asterdium 0.0.3 - Vulkan triangle" : "Asterdium 0.0.3 - Vulkan clear",
+                NULL, NULL);
         if (window == NULL) throw new IllegalStateException("Could not create a Vulkan-capable GLFW window");
 
         createInstanceAndSurface();
@@ -95,13 +129,16 @@ public final class VulkanSmoke implements AutoCloseable {
         if (!directTransferClear) {
             createRenderPass();
             createImageViewsAndFramebuffers();
+            if (drawTriangle) createTrianglePipeline();
         }
         createCommandBuffers();
         createSyncObjects();
 
         System.out.println("Asterdium Vulkan window ready (" + swapchainWidth + "x" + swapchainHeight + ").");
-        System.out.println("Clear method: " + (directTransferClear ? "direct Vulkan image transfer" : "render-pass fallback"));
-        System.out.println("Vulkan setup complete; attempting the first dark blue-teal frame. Press Escape to close.");
+        System.out.println("Render method: " + (drawTriangle ? "Vulkan graphics pipeline + triangle"
+                : directTransferClear ? "direct Vulkan image transfer" : "render-pass clear"));
+        System.out.println("Vulkan setup complete; queuing one "
+                + (drawTriangle ? "colored triangle" : "dark blue-teal clear") + " frame. Press Escape to close.");
     }
 
     private void createInstanceAndSurface() {
@@ -113,9 +150,9 @@ public final class VulkanSmoke implements AutoCloseable {
             VkApplicationInfo app = VkApplicationInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_APPLICATION_INFO)
                     .pApplicationName(stack.UTF8("Asterdium Vulkan Smoke"))
-                    .applicationVersion(2)
+                    .applicationVersion(3)
                     .pEngineName(stack.UTF8("Asterdium"))
-                    .engineVersion(2)
+                    .engineVersion(3)
                     .apiVersion(VK_API_VERSION_1_0);
             VkInstanceCreateInfo create = VkInstanceCreateInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
@@ -215,7 +252,8 @@ public final class VulkanSmoke implements AutoCloseable {
             }
             // Try a second, independent clear path to distinguish render-pass
             // problems from driver/WSI presentation problems on Windows.
-            directTransferClear = (capabilities.supportedUsageFlags() & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
+            directTransferClear = !drawTriangle
+                    && (capabilities.supportedUsageFlags() & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
 
             IntBuffer count = stack.ints(0);
             check(vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, count, null), "surface format count");
@@ -377,6 +415,122 @@ public final class VulkanSmoke implements AutoCloseable {
         }
     }
 
+    private void createTrianglePipeline() {
+        long compiler = shaderc_compiler_initialize();
+        if (compiler == NULL) throw new IllegalStateException("shaderc could not initialize");
+        long options = shaderc_compile_options_initialize();
+        if (options == NULL) {
+            shaderc_compiler_release(compiler);
+            throw new IllegalStateException("shaderc options could not initialize");
+        }
+
+        long vertexModule = VK_NULL_HANDLE;
+        long fragmentModule = VK_NULL_HANDLE;
+        try {
+            shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
+                    shaderc_env_version_vulkan_1_0);
+            vertexModule = compileShaderModule(compiler, options, TRIANGLE_VERTEX_SHADER,
+                    shaderc_vertex_shader, "asterdium_triangle.vert");
+            fragmentModule = compileShaderModule(compiler, options, TRIANGLE_FRAGMENT_SHADER,
+                    shaderc_fragment_shader, "asterdium_triangle.frag");
+
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+                LongBuffer layoutHandle = stack.mallocLong(1);
+                check(vkCreatePipelineLayout(device, layoutInfo, null, layoutHandle), "vkCreatePipelineLayout");
+                pipelineLayout = layoutHandle.get(0);
+
+                ByteBuffer entryPoint = stack.UTF8("main");
+                VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
+                stages.get(0).sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO)
+                        .stage(VK_SHADER_STAGE_VERTEX_BIT).module(vertexModule).pName(entryPoint);
+                stages.get(1).sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO)
+                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fragmentModule).pName(entryPoint);
+
+                // gl_VertexIndex supplies all 3 positions, so no vertex buffer is needed yet.
+                VkPipelineVertexInputStateCreateInfo vertexInput = VkPipelineVertexInputStateCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO);
+                VkPipelineInputAssemblyStateCreateInfo assembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO)
+                        .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+
+                VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+                viewport.get(0).x(0).y(0).width(swapchainWidth).height(swapchainHeight)
+                        .minDepth(0).maxDepth(1);
+                VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+                scissor.get(0).offset().set(0, 0);
+                scissor.get(0).extent().set(swapchainWidth, swapchainHeight);
+                VkPipelineViewportStateCreateInfo viewportState = VkPipelineViewportStateCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO)
+                        .pViewports(viewport).pScissors(scissor);
+
+                VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO)
+                        .polygonMode(VK_POLYGON_MODE_FILL)
+                        .cullMode(VK_CULL_MODE_NONE)
+                        .frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
+                        .lineWidth(1.0f);
+                VkPipelineMultisampleStateCreateInfo multisampling = VkPipelineMultisampleStateCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO)
+                        .rasterizationSamples(VK_SAMPLE_COUNT_1_BIT);
+                VkPipelineColorBlendAttachmentState.Buffer blendAttachment = VkPipelineColorBlendAttachmentState.calloc(1, stack);
+                blendAttachment.get(0).colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
+                VkPipelineColorBlendStateCreateInfo blending = VkPipelineColorBlendStateCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO)
+                        .pAttachments(blendAttachment);
+
+                VkGraphicsPipelineCreateInfo.Buffer pipelineInfo = VkGraphicsPipelineCreateInfo.calloc(1, stack);
+                pipelineInfo.get(0).sType(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO)
+                        .pStages(stages)
+                        .pVertexInputState(vertexInput)
+                        .pInputAssemblyState(assembly)
+                        .pViewportState(viewportState)
+                        .pRasterizationState(rasterizer)
+                        .pMultisampleState(multisampling)
+                        .pColorBlendState(blending)
+                        .layout(pipelineLayout)
+                        .renderPass(renderPass)
+                        .subpass(0);
+                LongBuffer pipelineHandle = stack.mallocLong(1);
+                check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, pipelineInfo, null, pipelineHandle),
+                        "vkCreateGraphicsPipelines");
+                trianglePipeline = pipelineHandle.get(0);
+            }
+            System.out.println("Compiled vertex + fragment shaders and created a Vulkan graphics pipeline.");
+        } finally {
+            if (fragmentModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragmentModule, null);
+            if (vertexModule != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertexModule, null);
+            shaderc_compile_options_release(options);
+            shaderc_compiler_release(compiler);
+        }
+    }
+
+    private long compileShaderModule(long compiler, long options, String source, int kind, String filename) {
+        long compiled = shaderc_compile_into_spv(compiler, source, kind, filename, "main", options);
+        if (compiled == NULL) throw new IllegalStateException("shaderc failed to compile " + filename);
+        try {
+            if (shaderc_result_get_compilation_status(compiled) != shaderc_compilation_status_success) {
+                throw new IllegalStateException(filename + ": " + shaderc_result_get_error_message(compiled));
+            }
+            ByteBuffer spirv = shaderc_result_get_bytes(compiled);
+            if (spirv == null || spirv.remaining() == 0) {
+                throw new IllegalStateException("shaderc produced empty SPIR-V for " + filename);
+            }
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkShaderModuleCreateInfo createInfo = VkShaderModuleCreateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+                        .pCode(spirv);
+                LongBuffer moduleHandle = stack.mallocLong(1);
+                check(vkCreateShaderModule(device, createInfo, null, moduleHandle), "vkCreateShaderModule " + filename);
+                return moduleHandle.get(0);
+            }
+        } finally {
+            shaderc_result_release(compiled);
+        }
+    }
+
     private void createCommandBuffers() {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkCommandPoolCreateInfo poolInfo = VkCommandPoolCreateInfo.calloc(stack)
@@ -416,6 +570,10 @@ public final class VulkanSmoke implements AutoCloseable {
                             .renderArea(rect)
                             .pClearValues(clear);
                     vkCmdBeginRenderPass(commandBuffers[i], render, VK_SUBPASS_CONTENTS_INLINE);
+                    if (drawTriangle) {
+                        vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
+                        vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
+                    }
                     vkCmdEndRenderPass(commandBuffers[i]);
                 }
                 check(vkEndCommandBuffer(commandBuffers[i]), "vkEndCommandBuffer");
@@ -510,7 +668,8 @@ public final class VulkanSmoke implements AutoCloseable {
                 check(result, "vkAcquireNextImageKHR");
             }
             int imageIndex = acquired.get(0);
-            System.out.println("[frame 1] Acquired image " + imageIndex + "; submitting Vulkan clear...");
+            System.out.println("[frame 1] Acquired image " + imageIndex + "; submitting Vulkan "
+                    + (drawTriangle ? "triangle" : "clear") + "...");
 
             check(vkResetFences(device, stack.longs(frameFence)), "vkResetFences");
             VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
@@ -528,7 +687,7 @@ public final class VulkanSmoke implements AutoCloseable {
                     + ", commands=" + submit.commandBufferCount()
                     + ", signal=" + submit.signalSemaphoreCount());
             check(vkQueueSubmit(graphicsQueue, submit, frameFence), "vkQueueSubmit");
-            System.out.println("[frame 1] Clear submitted; calling vkQueuePresentKHR...");
+            System.out.println("[frame 1] GPU commands submitted; calling vkQueuePresentKHR...");
 
             VkPresentInfoKHR present = VkPresentInfoKHR.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_PRESENT_INFO_KHR)
@@ -549,7 +708,7 @@ public final class VulkanSmoke implements AutoCloseable {
             System.out.println("[frame 1] vkQueuePresentKHR returned VK_SUCCESS. Check the window color.");
             int completed = vkWaitForFences(device, stack.longs(frameFence), true, FRAME_WAIT_NANOSECONDS);
             if (completed == VK_SUCCESS) {
-                System.out.println("[gpu] GPU fence signaled: clear command buffer finished; presentation is separate.");
+                System.out.println("[gpu] GPU fence signaled: command buffer finished; presentation is separate.");
             } else if (completed == VK_TIMEOUT) {
                 System.out.println("[gpu] GPU fence NOT signaled after 2 seconds: queue submission is stalled.");
             } else {
@@ -588,6 +747,8 @@ public final class VulkanSmoke implements AutoCloseable {
                     if (imageView != 0) vkDestroyImageView(device, imageView, null);
                 }
             }
+            if (trianglePipeline != 0) vkDestroyPipeline(device, trianglePipeline, null);
+            if (pipelineLayout != 0) vkDestroyPipelineLayout(device, pipelineLayout, null);
             if (renderPass != 0) vkDestroyRenderPass(device, renderPass, null);
             if (swapchain != 0) vkDestroySwapchainKHR(device, swapchain, null);
             vkDestroyDevice(device, null);
