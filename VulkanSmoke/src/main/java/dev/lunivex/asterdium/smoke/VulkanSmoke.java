@@ -17,13 +17,13 @@ import static org.lwjgl.vulkan.KHRSwapchain.*;
 import static org.lwjgl.vulkan.VK10.*;
 
 /**
- * Asterdium 0.0.3: an isolated Vulkan graphics-pipeline triangle test.
+ * Asterdium 0.0.4: an isolated animated Vulkan graphics-pipeline test.
  * Nothing in this class is invoked by the Fabric Minecraft mod.
  *
- * The default mode draws one colored triangle on the proven teal background.
- * Set ASTERDIUM_RENDER_MODE=clear to keep the original 0.0.2 clear-only test
- * available when debugging drivers or presentation. Neither mode renders
- * Minecraft geometry or measures Minecraft FPS.
+ * By default, an animated triangle is drawn continuously on a teal background.
+ * ASTERDIUM_RENDER_MODE=static preserves the 0.0.3 one-frame triangle, and
+ * ASTERDIUM_RENDER_MODE=clear preserves the 0.0.2 direct-transfer clear.
+ * These are standalone diagnostics, not Minecraft rendering or FPS benchmarks.
  */
 public final class VulkanSmoke implements AutoCloseable {
     private static final int WIDTH = 960;
@@ -33,6 +33,9 @@ public final class VulkanSmoke implements AutoCloseable {
     private static final String TRIANGLE_VERTEX_SHADER = """
             #version 450
             layout(location = 0) out vec3 vertexColor;
+            layout(push_constant) uniform FrameData {
+                float elapsedSeconds;
+            } frame;
             void main() {
                 vec2 positions[3] = vec2[](
                     vec2( 0.00, -0.68),
@@ -44,7 +47,13 @@ public final class VulkanSmoke implements AutoCloseable {
                     vec3(0.33, 0.54, 1.00),
                     vec3(0.91, 0.36, 0.95)
                 );
-                gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+                float angle = frame.elapsedSeconds * 0.65;
+                float c = cos(angle);
+                float s = sin(angle);
+                vec2 position = positions[gl_VertexIndex];
+                vec2 rotated = vec2(position.x * c - position.y * s,
+                                    position.x * s + position.y * c);
+                gl_Position = vec4(rotated * 0.8, 0.0, 1.0);
                 vertexColor = colors[gl_VertexIndex];
             }
             """;
@@ -57,7 +66,9 @@ public final class VulkanSmoke implements AutoCloseable {
             }
             """;
 
-    private final boolean drawTriangle = !"clear".equalsIgnoreCase(System.getenv("ASTERDIUM_RENDER_MODE"));
+    private final String renderMode = System.getenv("ASTERDIUM_RENDER_MODE");
+    private final boolean drawTriangle = !"clear".equalsIgnoreCase(renderMode);
+    private final boolean animateTriangle = drawTriangle && !"static".equalsIgnoreCase(renderMode);
     private long window;
     private boolean glfwReady;
     private boolean vulkanReady;
@@ -118,7 +129,9 @@ public final class VulkanSmoke implements AutoCloseable {
         // A fixed-size smoke test avoids pretending we have swapchain recreation yet.
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
         window = glfwCreateWindow(WIDTH, HEIGHT,
-                drawTriangle ? "Asterdium 0.0.3 - Vulkan triangle" : "Asterdium 0.0.3 - Vulkan clear",
+                animateTriangle ? "Asterdium 0.0.4 - Animated Vulkan triangle"
+                        : drawTriangle ? "Asterdium 0.0.4 - Static Vulkan triangle"
+                        : "Asterdium 0.0.4 - Vulkan clear",
                 NULL, NULL);
         if (window == NULL) throw new IllegalStateException("Could not create a Vulkan-capable GLFW window");
 
@@ -131,14 +144,15 @@ public final class VulkanSmoke implements AutoCloseable {
             createImageViewsAndFramebuffers();
             if (drawTriangle) createTrianglePipeline();
         }
-        createCommandBuffers();
+        createCommandPoolAndBuffers();
         createSyncObjects();
 
         System.out.println("Asterdium Vulkan window ready (" + swapchainWidth + "x" + swapchainHeight + ").");
-        System.out.println("Render method: " + (drawTriangle ? "Vulkan graphics pipeline + triangle"
+        System.out.println("Render method: " + (animateTriangle ? "animated Vulkan triangle"
+                : drawTriangle ? "static Vulkan triangle"
                 : directTransferClear ? "direct Vulkan image transfer" : "render-pass clear"));
-        System.out.println("Vulkan setup complete; queuing one "
-                + (drawTriangle ? "colored triangle" : "dark blue-teal clear") + " frame. Press Escape to close.");
+        System.out.println("Vulkan setup complete; " + (animateTriangle ? "entering the continuous frame loop"
+                : "queuing one diagnostic frame") + ". Press Escape to close.");
     }
 
     private void createInstanceAndSurface() {
@@ -285,8 +299,11 @@ public final class VulkanSmoke implements AutoCloseable {
             }
             System.out.println("Supported presentation modes: " + available);
             String requested = System.getenv("ASTERDIUM_PRESENT_MODE");
+            // FIFO is guaranteed by Vulkan and avoids excessive frames/tearing.
+            // Retain IMMEDIATE for the single-frame modes that Star validated.
             int preferred = "fifo".equalsIgnoreCase(requested) ? VK_PRESENT_MODE_FIFO_KHR
                     : "mailbox".equalsIgnoreCase(requested) ? VK_PRESENT_MODE_MAILBOX_KHR
+                    : requested == null && animateTriangle ? VK_PRESENT_MODE_FIFO_KHR
                     : VK_PRESENT_MODE_IMMEDIATE_KHR;
             if (supportsPresentMode(presentModes, preferred)) {
                 presentMode = preferred;
@@ -438,8 +455,12 @@ public final class VulkanSmoke implements AutoCloseable {
                     shaderc_fragment_shader, "asterdium_triangle.frag");
 
             try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkPushConstantRange.Buffer pushConstants = VkPushConstantRange.calloc(1, stack);
+                pushConstants.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)
+                        .offset(0).size(Float.BYTES);
                 VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
-                        .sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+                        .sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO)
+                        .pPushConstantRanges(pushConstants);
                 LongBuffer layoutHandle = stack.mallocLong(1);
                 check(vkCreatePipelineLayout(device, layoutInfo, null, layoutHandle), "vkCreatePipelineLayout");
                 pipelineLayout = layoutHandle.get(0);
@@ -537,10 +558,11 @@ public final class VulkanSmoke implements AutoCloseable {
         }
     }
 
-    private void createCommandBuffers() {
+    private void createCommandPoolAndBuffers() {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkCommandPoolCreateInfo poolInfo = VkCommandPoolCreateInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+                    .flags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
                     .queueFamilyIndex(graphicsFamily);
             LongBuffer poolOut = stack.mallocLong(1);
             check(vkCreateCommandPool(device, poolInfo, null, poolOut), "vkCreateCommandPool");
@@ -556,34 +578,46 @@ public final class VulkanSmoke implements AutoCloseable {
             commandBuffers = new VkCommandBuffer[images.length];
             for (int i = 0; i < images.length; i++) {
                 commandBuffers[i] = new VkCommandBuffer(commandPointers.get(i), device);
-                VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
-                        .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
-                        .flags(VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT);
-                check(vkBeginCommandBuffer(commandBuffers[i], begin), "vkBeginCommandBuffer");
-                if (directTransferClear) {
-                    recordDirectClear(commandBuffers[i], images[i], stack);
-                } else {
-                    VkClearValue.Buffer clear = VkClearValue.calloc(1, stack);
-                    clear.get(0).color().float32(0, 0.015f).float32(1, 0.12f)
-                            .float32(2, 0.16f).float32(3, 1.0f);
-                    VkRect2D rect = VkRect2D.calloc(stack);
-                    rect.offset().set(0, 0);
-                    rect.extent().set(swapchainWidth, swapchainHeight);
-                    VkRenderPassBeginInfo render = VkRenderPassBeginInfo.calloc(stack)
-                            .sType(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO)
-                            .renderPass(renderPass)
-                            .framebuffer(framebuffers[i])
-                            .renderArea(rect)
-                            .pClearValues(clear);
-                    vkCmdBeginRenderPass(commandBuffers[i], render, VK_SUBPASS_CONTENTS_INLINE);
-                    if (drawTriangle) {
-                        vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
-                        vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
-                    }
-                    vkCmdEndRenderPass(commandBuffers[i]);
-                }
-                check(vkEndCommandBuffer(commandBuffers[i]), "vkEndCommandBuffer");
             }
+        }
+    }
+
+    private void recordFrameCommands(int imageIndex, float elapsedSeconds) {
+        VkCommandBuffer commands = commandBuffers[imageIndex];
+        // Only one GPU submission is in flight. The previous frame's fence is
+        // waited before this reset, so the command buffer is no longer pending.
+        check(vkResetCommandBuffer(commands, 0), "vkResetCommandBuffer");
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+                    .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+            check(vkBeginCommandBuffer(commands, begin), "vkBeginCommandBuffer");
+
+            if (directTransferClear) {
+                recordDirectClear(commands, images[imageIndex], stack);
+            } else {
+                VkClearValue.Buffer clear = VkClearValue.calloc(1, stack);
+                clear.get(0).color().float32(0, 0.015f).float32(1, 0.12f)
+                        .float32(2, 0.16f).float32(3, 1.0f);
+                VkRect2D rect = VkRect2D.calloc(stack);
+                rect.offset().set(0, 0);
+                rect.extent().set(swapchainWidth, swapchainHeight);
+                VkRenderPassBeginInfo render = VkRenderPassBeginInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO)
+                        .renderPass(renderPass)
+                        .framebuffer(framebuffers[imageIndex])
+                        .renderArea(rect)
+                        .pClearValues(clear);
+                vkCmdBeginRenderPass(commands, render, VK_SUBPASS_CONTENTS_INLINE);
+                if (drawTriangle) {
+                    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
+                    vkCmdPushConstants(commands, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                            0, stack.floats(elapsedSeconds));
+                    vkCmdDraw(commands, 3, 1, 0, 0);
+                }
+                vkCmdEndRenderPass(commands);
+            }
+            check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
         }
     }
 
@@ -645,37 +679,73 @@ public final class VulkanSmoke implements AutoCloseable {
     }
 
     private void runFrames() {
-        System.out.println("[frame 1] Entering GLFW event loop...");
-        // This is a static color smoke test, not a game loop. On Star's first
-        // RTX 3060 run, queuing image 0 for presentation succeeded but the *second* image
-        // acquisition timed out. Present once, then keep pumping GLFW events
-        // so we can tell whether the first submitted image is actually visible.
-        glfwPollEvents();
-        if (glfwWindowShouldClose(window)) return;
+        System.out.println("[loop] " + (animateTriangle ? "Continuous animation" : "Single-frame diagnostic")
+                + " started. Press Escape to exit.");
+        long startNanos = System.nanoTime();
+        long reportNanos = startNanos;
+        int framesSinceReport = 0;
+        long frameNumber = 0;
+        while (!glfwWindowShouldClose(window)) {
+            glfwPollEvents();
+            if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) break;
+
+            float elapsedSeconds = animateTriangle
+                    ? (System.nanoTime() - startNanos) / 1_000_000_000.0f : 0.0f;
+            if (!drawFrame(++frameNumber, elapsedSeconds)) break;
+
+            if (!animateTriangle) {
+                // Both legacy diagnostics intentionally show just one image.
+                // The active animation path is the separate multi-frame test.
+                System.out.println("[display] One diagnostic frame queued; waiting for window events.");
+                while (!glfwWindowShouldClose(window)) {
+                    glfwWaitEventsTimeout(0.05);
+                    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) break;
+                }
+                break;
+            }
+
+            framesSinceReport++;
+            long now = System.nanoTime();
+            if (now - reportNanos >= 1_000_000_000L) {
+                double interval = (now - reportNanos) / 1_000_000_000.0;
+                System.out.printf("[loop] %.1f presented frames/sec (%d total)%n",
+                        framesSinceReport / interval, frameNumber);
+                reportNanos = now;
+                framesSinceReport = 0;
+            }
+        }
+        System.out.println("[loop] Exiting after " + frameNumber + " submitted frame(s).");
+    }
+
+    private boolean drawFrame(long frameNumber, float elapsedSeconds) {
+        boolean firstFrame = frameNumber == 1;
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            System.out.println("[frame 1] GLFW responsive; waiting for GPU fence...");
+            if (firstFrame) System.out.println("[frame 1] Waiting for GPU fence...");
             int fenceResult = vkWaitForFences(device, stack.longs(frameFence), true, FRAME_WAIT_NANOSECONDS);
             if (fenceResult == VK_TIMEOUT) {
                 throw new IllegalStateException("GPU frame fence timed out after 2 seconds");
             }
             check(fenceResult, "vkWaitForFences");
-            System.out.println("[frame 1] Fence ready; acquiring a swapchain image...");
+            if (firstFrame) System.out.println("[frame 1] Fence ready; acquiring a swapchain image...");
             IntBuffer acquired = stack.ints(0);
             int result = vkAcquireNextImageKHR(device, swapchain, FRAME_WAIT_NANOSECONDS, imageAvailable,
                     VK_NULL_HANDLE, acquired);
             if (result == VK_TIMEOUT || result == VK_NOT_READY) {
-                throw new IllegalStateException("Swapchain image acquisition timed out after 2 seconds");
+                throw new IllegalStateException("Swapchain image acquisition stalled at frame " + frameNumber
+                        + " after 2 seconds; try ASTERDIUM_PRESENT_MODE=fifo");
             }
             if (result == VK_ERROR_OUT_OF_DATE_KHR) {
                 System.out.println("Swapchain out of date; restart the fixed-size smoke test.");
-                return;
+                return false;
             }
             if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
                 check(result, "vkAcquireNextImageKHR");
             }
             int imageIndex = acquired.get(0);
-            System.out.println("[frame 1] Acquired image " + imageIndex + "; submitting Vulkan "
-                    + (drawTriangle ? "triangle" : "clear") + "...");
+            if (firstFrame) System.out.println("[frame 1] Acquired image " + imageIndex
+                    + "; recording and submitting Vulkan " + (drawTriangle ? "triangle" : "clear") + "...");
+
+            recordFrameCommands(imageIndex, elapsedSeconds);
 
             check(vkResetFences(device, stack.longs(frameFence)), "vkResetFences");
             VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
@@ -689,11 +759,11 @@ public final class VulkanSmoke implements AutoCloseable {
                     // LWJGL derives commandBufferCount and signalSemaphoreCount
                     // from their buffers. The shared wait count is explicit.
                     .waitSemaphoreCount(1);
-            System.out.println("[frame 1] Submit arrays: wait=" + submit.waitSemaphoreCount()
+            if (firstFrame) System.out.println("[frame 1] Submit arrays: wait=" + submit.waitSemaphoreCount()
                     + ", commands=" + submit.commandBufferCount()
                     + ", signal=" + submit.signalSemaphoreCount());
             check(vkQueueSubmit(graphicsQueue, submit, frameFence), "vkQueueSubmit");
-            System.out.println("[frame 1] GPU commands submitted; calling vkQueuePresentKHR...");
+            if (firstFrame) System.out.println("[frame 1] Submitted; calling vkQueuePresentKHR...");
 
             VkPresentInfoKHR present = VkPresentInfoKHR.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_PRESENT_INFO_KHR)
@@ -703,31 +773,19 @@ public final class VulkanSmoke implements AutoCloseable {
                     // Validated on Star's RTX 3060: a zero swapchainCount
                     // produced VUID-VkPresentInfoKHR-swapchainCount-arraylength.
                     .swapchainCount(1);
-            System.out.println("[frame 1] Present arrays: wait=" + present.waitSemaphoreCount()
+            if (firstFrame) System.out.println("[frame 1] Present arrays: wait=" + present.waitSemaphoreCount()
                     + ", swapchains=" + present.swapchainCount());
             int presentResult = vkQueuePresentKHR(graphicsQueue, present);
             if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
                 System.out.println("Presentation surface changed; restart the smoke test.");
-                return;
+                return false;
             }
             check(presentResult, "vkQueuePresentKHR");
-            System.out.println("[frame 1] vkQueuePresentKHR returned VK_SUCCESS. Check the window color.");
-            int completed = vkWaitForFences(device, stack.longs(frameFence), true, FRAME_WAIT_NANOSECONDS);
-            if (completed == VK_SUCCESS) {
-                System.out.println("[gpu] GPU fence signaled: command buffer finished; presentation is separate.");
-            } else if (completed == VK_TIMEOUT) {
-                System.out.println("[gpu] GPU fence NOT signaled after 2 seconds: queue submission is stalled.");
-            } else {
-                check(completed, "frame completion fence");
-            }
-        }
-
-        System.out.println("[display] One Vulkan frame queued; pumping window events without acquiring another image.");
-        while (!glfwWindowShouldClose(window)) {
-            glfwWaitEventsTimeout(0.05);
-            if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-                glfwSetWindowShouldClose(window, true);
-            }
+            if (firstFrame) System.out.println("[frame 1] vkQueuePresentKHR returned VK_SUCCESS.");
+            // This CPU/GPU fence only covers command execution, not the
+            // presentation engine; the per-swapchain-image semaphore protects
+            // reuse when the same image is later acquired again.
+            return true;
         }
     }
 
