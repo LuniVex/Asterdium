@@ -11,23 +11,26 @@ import org.lwjgl.vulkan.*;
 import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.glfw.GLFWVulkan.*;
 import static org.lwjgl.system.MemoryUtil.NULL;
+import static org.lwjgl.system.MemoryUtil.memAddress;
+import static org.lwjgl.system.MemoryUtil.memCopy;
 import static org.lwjgl.util.shaderc.Shaderc.*;
 import static org.lwjgl.vulkan.KHRSurface.*;
 import static org.lwjgl.vulkan.KHRSwapchain.*;
 import static org.lwjgl.vulkan.VK10.*;
 
 /**
- * Asterdium 0.0.4: an isolated animated Vulkan graphics-pipeline test.
+ * Asterdium 0.0.5: standalone Vulkan textured-geometry research.
  * Nothing in this class is invoked by the Fabric Minecraft mod.
  *
- * By default, an animated triangle is drawn continuously on a teal background.
- * ASTERDIUM_RENDER_MODE=static preserves the 0.0.3 one-frame triangle, and
- * ASTERDIUM_RENDER_MODE=clear preserves the 0.0.2 direct-transfer clear.
+ * By default, a textured quad rotates on a teal background. Use
+ * ASTERDIUM_RENDER_MODE=triangle for the 0.0.4 animated triangle,
+ * static for the 0.0.3 one-frame triangle, or clear for the 0.0.2 clear.
  * These are standalone diagnostics, not Minecraft rendering or FPS benchmarks.
  */
 public final class VulkanSmoke implements AutoCloseable {
     private static final int WIDTH = 960;
     private static final int HEIGHT = 540;
+    private static final int TEXTURE_SIZE = 32;
     // An infinite wait hides GPU/WSI failures behind a white "Not Responding" window.
     private static final long FRAME_WAIT_NANOSECONDS = 2_000_000_000L;
     private static final String TRIANGLE_VERTEX_SHADER = """
@@ -65,10 +68,34 @@ public final class VulkanSmoke implements AutoCloseable {
                 fragmentColor = vec4(vertexColor, 1.0);
             }
             """;
+    private static final String QUAD_VERTEX_SHADER = """
+            #version 450
+            layout(location = 0) in vec2 inPosition;
+            layout(location = 1) in vec2 inUv;
+            layout(location = 0) out vec2 fragmentUv;
+            layout(push_constant) uniform FrameData { float elapsedSeconds; } frame;
+            void main() {
+                float angle = frame.elapsedSeconds * 0.65;
+                float c = cos(angle), s = sin(angle);
+                gl_Position = vec4(inPosition.x * c - inPosition.y * s,
+                                   inPosition.x * s + inPosition.y * c, 0.0, 1.0);
+                fragmentUv = inUv;
+            }
+            """;
+    private static final String QUAD_FRAGMENT_SHADER = """
+            #version 450
+            layout(set = 0, binding = 0) uniform sampler2D albedo;
+            layout(location = 0) in vec2 fragmentUv;
+            layout(location = 0) out vec4 fragmentColor;
+            void main() { fragmentColor = texture(albedo, fragmentUv); }
+            """;
 
     private final String renderMode = System.getenv("ASTERDIUM_RENDER_MODE");
-    private final boolean drawTriangle = !"clear".equalsIgnoreCase(renderMode);
-    private final boolean animateTriangle = drawTriangle && !"static".equalsIgnoreCase(renderMode);
+    private final boolean drawTriangle = "triangle".equalsIgnoreCase(renderMode)
+            || "static".equalsIgnoreCase(renderMode);
+    private final boolean drawTexturedQuad = !drawTriangle && !"clear".equalsIgnoreCase(renderMode);
+    private final boolean drawGeometry = drawTriangle || drawTexturedQuad;
+    private final boolean animate = drawTexturedQuad || "triangle".equalsIgnoreCase(renderMode);
     private long window;
     private boolean glfwReady;
     private boolean vulkanReady;
@@ -92,7 +119,18 @@ public final class VulkanSmoke implements AutoCloseable {
     private long[] framebuffers;
     private long renderPass;
     private long pipelineLayout;
-    private long trianglePipeline;
+    private long graphicsPipeline;
+    private long vertexBuffer;
+    private long vertexMemory;
+    private long indexBuffer;
+    private long indexMemory;
+    private long textureImage;
+    private long textureMemory;
+    private long textureView;
+    private long textureSampler;
+    private long descriptorLayout;
+    private long descriptorPool;
+    private long descriptorSet;
     private long commandPool;
     private VkCommandBuffer[] commandBuffers;
     private long imageAvailable;
@@ -129,9 +167,10 @@ public final class VulkanSmoke implements AutoCloseable {
         // A fixed-size smoke test avoids pretending we have swapchain recreation yet.
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
         window = glfwCreateWindow(WIDTH, HEIGHT,
-                animateTriangle ? "Asterdium 0.0.4 - Animated Vulkan triangle"
-                        : drawTriangle ? "Asterdium 0.0.4 - Static Vulkan triangle"
-                        : "Asterdium 0.0.4 - Vulkan clear",
+                drawTexturedQuad ? "Asterdium 0.0.5 - Textured Vulkan quad"
+                        : animate ? "Asterdium 0.0.5 - Animated Vulkan triangle"
+                        : drawTriangle ? "Asterdium 0.0.5 - Static Vulkan triangle"
+                        : "Asterdium 0.0.5 - Vulkan clear",
                 NULL, NULL);
         if (window == NULL) throw new IllegalStateException("Could not create a Vulkan-capable GLFW window");
 
@@ -142,16 +181,19 @@ public final class VulkanSmoke implements AutoCloseable {
         if (!directTransferClear) {
             createRenderPass();
             createImageViewsAndFramebuffers();
-            if (drawTriangle) createTrianglePipeline();
+            if (drawTexturedQuad) createTextureDescriptorLayout();
+            if (drawGeometry) createGraphicsPipeline();
         }
         createCommandPoolAndBuffers();
+        if (drawTexturedQuad) createTexturedGeometry();
         createSyncObjects();
 
         System.out.println("Asterdium Vulkan window ready (" + swapchainWidth + "x" + swapchainHeight + ").");
-        System.out.println("Render method: " + (animateTriangle ? "animated Vulkan triangle"
+        System.out.println("Render method: " + (drawTexturedQuad ? "rotating textured Vulkan quad"
+                : animate ? "animated Vulkan triangle"
                 : drawTriangle ? "static Vulkan triangle"
                 : directTransferClear ? "direct Vulkan image transfer" : "render-pass clear"));
-        System.out.println("Vulkan setup complete; " + (animateTriangle ? "entering the continuous frame loop"
+        System.out.println("Vulkan setup complete; " + (animate ? "entering the continuous frame loop"
                 : "queuing one diagnostic frame") + ". Press Escape to close.");
     }
 
@@ -266,7 +308,7 @@ public final class VulkanSmoke implements AutoCloseable {
             }
             // Try a second, independent clear path to distinguish render-pass
             // problems from driver/WSI presentation problems on Windows.
-            directTransferClear = !drawTriangle
+            directTransferClear = !drawGeometry
                     && (capabilities.supportedUsageFlags() & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
 
             IntBuffer count = stack.ints(0);
@@ -303,7 +345,7 @@ public final class VulkanSmoke implements AutoCloseable {
             // Retain IMMEDIATE for the single-frame modes that Star validated.
             int preferred = "fifo".equalsIgnoreCase(requested) ? VK_PRESENT_MODE_FIFO_KHR
                     : "mailbox".equalsIgnoreCase(requested) ? VK_PRESENT_MODE_MAILBOX_KHR
-                    : requested == null && animateTriangle ? VK_PRESENT_MODE_FIFO_KHR
+                    : requested == null && animate ? VK_PRESENT_MODE_FIFO_KHR
                     : VK_PRESENT_MODE_IMMEDIATE_KHR;
             if (supportsPresentMode(presentModes, preferred)) {
                 presentMode = preferred;
@@ -435,7 +477,23 @@ public final class VulkanSmoke implements AutoCloseable {
         }
     }
 
-    private void createTrianglePipeline() {
+    private void createTextureDescriptorLayout() {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkDescriptorSetLayoutBinding.Buffer binding = VkDescriptorSetLayoutBinding.calloc(1, stack);
+            binding.get(0).binding(0)
+                    .descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1)
+                    .stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT);
+            VkDescriptorSetLayoutCreateInfo info = VkDescriptorSetLayoutCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO)
+                    .pBindings(binding);
+            LongBuffer result = stack.mallocLong(1);
+            check(vkCreateDescriptorSetLayout(device, info, null, result), "vkCreateDescriptorSetLayout");
+            descriptorLayout = result.get(0);
+        }
+    }
+
+    private void createGraphicsPipeline() {
         long compiler = shaderc_compiler_initialize();
         if (compiler == NULL) throw new IllegalStateException("shaderc could not initialize");
         long options = shaderc_compile_options_initialize();
@@ -449,10 +507,12 @@ public final class VulkanSmoke implements AutoCloseable {
         try {
             shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
                     shaderc_env_version_vulkan_1_0);
-            vertexModule = compileShaderModule(compiler, options, TRIANGLE_VERTEX_SHADER,
-                    shaderc_vertex_shader, "asterdium_triangle.vert");
-            fragmentModule = compileShaderModule(compiler, options, TRIANGLE_FRAGMENT_SHADER,
-                    shaderc_fragment_shader, "asterdium_triangle.frag");
+            vertexModule = compileShaderModule(compiler, options,
+                    drawTexturedQuad ? QUAD_VERTEX_SHADER : TRIANGLE_VERTEX_SHADER,
+                    shaderc_vertex_shader, drawTexturedQuad ? "asterdium_quad.vert" : "asterdium_triangle.vert");
+            fragmentModule = compileShaderModule(compiler, options,
+                    drawTexturedQuad ? QUAD_FRAGMENT_SHADER : TRIANGLE_FRAGMENT_SHADER,
+                    shaderc_fragment_shader, drawTexturedQuad ? "asterdium_quad.frag" : "asterdium_triangle.frag");
 
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkPushConstantRange.Buffer pushConstants = VkPushConstantRange.calloc(1, stack);
@@ -461,6 +521,7 @@ public final class VulkanSmoke implements AutoCloseable {
                 VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO)
                         .pPushConstantRanges(pushConstants);
+                if (drawTexturedQuad) layoutInfo.pSetLayouts(stack.longs(descriptorLayout));
                 LongBuffer layoutHandle = stack.mallocLong(1);
                 check(vkCreatePipelineLayout(device, layoutInfo, null, layoutHandle), "vkCreatePipelineLayout");
                 pipelineLayout = layoutHandle.get(0);
@@ -472,9 +533,19 @@ public final class VulkanSmoke implements AutoCloseable {
                 stages.get(1).sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO)
                         .stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fragmentModule).pName(entryPoint);
 
-                // gl_VertexIndex supplies all 3 positions, so no vertex buffer is needed yet.
+                // The legacy triangle uses gl_VertexIndex; the quad takes position/UV
+                // from an interleaved, explicitly bound vertex buffer.
                 VkPipelineVertexInputStateCreateInfo vertexInput = VkPipelineVertexInputStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO);
+                if (drawTexturedQuad) {
+                    VkVertexInputBindingDescription.Buffer bindings = VkVertexInputBindingDescription.calloc(1, stack);
+                    bindings.get(0).binding(0).stride(4 * Float.BYTES).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+                    VkVertexInputAttributeDescription.Buffer attributes = VkVertexInputAttributeDescription.calloc(2, stack);
+                    attributes.get(0).location(0).binding(0).format(VK_FORMAT_R32G32_SFLOAT).offset(0);
+                    attributes.get(1).location(1).binding(0).format(VK_FORMAT_R32G32_SFLOAT).offset(2 * Float.BYTES);
+                    vertexInput.pVertexBindingDescriptions(bindings).pVertexAttributeDescriptions(attributes)
+                            .vertexBindingDescriptionCount(1).vertexAttributeDescriptionCount(2);
+                }
                 VkPipelineInputAssemblyStateCreateInfo assembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO)
                         .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
@@ -523,7 +594,7 @@ public final class VulkanSmoke implements AutoCloseable {
                 LongBuffer pipelineHandle = stack.mallocLong(1);
                 check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, pipelineInfo, null, pipelineHandle),
                         "vkCreateGraphicsPipelines");
-                trianglePipeline = pipelineHandle.get(0);
+                graphicsPipeline = pipelineHandle.get(0);
             }
             System.out.println("Compiled vertex + fragment shaders and created a Vulkan graphics pipeline.");
         } finally {
@@ -582,6 +653,264 @@ public final class VulkanSmoke implements AutoCloseable {
         }
     }
 
+    private record BufferAllocation(long buffer, long memory) { }
+
+    private int findMemoryType(int allowedTypes, int requiredProperties) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkPhysicalDeviceMemoryProperties properties = VkPhysicalDeviceMemoryProperties.calloc(stack);
+            vkGetPhysicalDeviceMemoryProperties(physicalDevice, properties);
+            for (int i = 0; i < properties.memoryTypeCount(); i++) {
+                if ((allowedTypes & (1 << i)) != 0
+                        && (properties.memoryTypes(i).propertyFlags() & requiredProperties) == requiredProperties) {
+                    return i;
+                }
+            }
+            throw new IllegalStateException("No suitable Vulkan memory type for flags " + requiredProperties);
+        }
+    }
+
+    private BufferAllocation createHostBuffer(ByteBuffer data, int usage) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkBufferCreateInfo bufferInfo = VkBufferCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
+                    .size(data.remaining())
+                    .usage(usage)
+                    .sharingMode(VK_SHARING_MODE_EXCLUSIVE);
+            LongBuffer bufferOut = stack.mallocLong(1);
+            check(vkCreateBuffer(device, bufferInfo, null, bufferOut), "vkCreateBuffer");
+            long buffer = bufferOut.get(0);
+            long memory = VK_NULL_HANDLE;
+            try {
+                VkMemoryRequirements requirements = VkMemoryRequirements.calloc(stack);
+                vkGetBufferMemoryRequirements(device, buffer, requirements);
+                VkMemoryAllocateInfo allocate = VkMemoryAllocateInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+                        .allocationSize(requirements.size())
+                        .memoryTypeIndex(findMemoryType(requirements.memoryTypeBits(),
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+                LongBuffer memoryOut = stack.mallocLong(1);
+                check(vkAllocateMemory(device, allocate, null, memoryOut), "vkAllocateMemory for buffer");
+                memory = memoryOut.get(0);
+                check(vkBindBufferMemory(device, buffer, memory, 0), "vkBindBufferMemory");
+                PointerBuffer mapped = stack.mallocPointer(1);
+                check(vkMapMemory(device, memory, 0, data.remaining(), 0, mapped), "vkMapMemory");
+                try {
+                    memCopy(memAddress(data), mapped.get(0), data.remaining());
+                } finally {
+                    vkUnmapMemory(device, memory);
+                }
+                return new BufferAllocation(buffer, memory);
+            } catch (Throwable failure) {
+                vkDestroyBuffer(device, buffer, null);
+                if (memory != VK_NULL_HANDLE) vkFreeMemory(device, memory, null);
+                throw failure;
+            }
+        }
+    }
+
+    private void createTexturedGeometry() {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            // Four interleaved XY/UV vertices; two indexed triangles share corners.
+            ByteBuffer vertices = stack.malloc(4 * 4 * Float.BYTES);
+            vertices.asFloatBuffer().put(new float[] {
+                    -0.62f, -0.78f, 0.0f, 1.0f,
+                     0.62f, -0.78f, 1.0f, 1.0f,
+                     0.62f,  0.78f, 1.0f, 0.0f,
+                    -0.62f,  0.78f, 0.0f, 0.0f
+            });
+            BufferAllocation vertex = createHostBuffer(vertices, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+            vertexBuffer = vertex.buffer();
+            vertexMemory = vertex.memory();
+
+            ByteBuffer indices = stack.malloc(6 * Integer.BYTES);
+            indices.asIntBuffer().put(new int[] {0, 1, 2, 2, 3, 0});
+            BufferAllocation index = createHostBuffer(indices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+            indexBuffer = index.buffer();
+            indexMemory = index.memory();
+
+            // Hand-made 32x32 pixel texture, no files/network/borrowed art.
+            // Sampling this in the fragment shader tests real image upload and UVs.
+            ByteBuffer pixels = stack.malloc(TEXTURE_SIZE * TEXTURE_SIZE * 4);
+            int[][] palette = {
+                    {30, 220, 226}, {75, 125, 255}, {210, 82, 236}
+            };
+            for (int y = 0; y < TEXTURE_SIZE; y++) {
+                for (int x = 0; x < TEXTURE_SIZE; x++) {
+                    int[] rgb = palette[((x / 8) + (y / 8)) % palette.length];
+                    boolean seam = x % 8 == 0 || y % 8 == 0;
+                    pixels.put((byte) (seam ? 12 : rgb[0]));
+                    pixels.put((byte) (seam ? 32 : rgb[1]));
+                    pixels.put((byte) (seam ? 48 : rgb[2]));
+                    pixels.put((byte) 255);
+                }
+            }
+            pixels.flip();
+            BufferAllocation staging = createHostBuffer(pixels, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            try {
+                createTextureImage();
+                uploadTexture(staging.buffer());
+            } finally {
+                vkDestroyBuffer(device, staging.buffer(), null);
+                vkFreeMemory(device, staging.memory(), null);
+            }
+            createTextureViewAndSampler();
+            createTextureDescriptor();
+            System.out.println("Uploaded 4 vertices, 6 indices and a 32x32 LuniVex texture to Vulkan.");
+        }
+    }
+
+    private void createTextureImage() {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
+                    .imageType(VK_IMAGE_TYPE_2D)
+                    .format(VK_FORMAT_R8G8B8A8_UNORM)
+                    .extent(VkExtent3D.calloc(stack).set(TEXTURE_SIZE, TEXTURE_SIZE, 1))
+                    .mipLevels(1).arrayLayers(1)
+                    .samples(VK_SAMPLE_COUNT_1_BIT)
+                    .tiling(VK_IMAGE_TILING_OPTIMAL)
+                    .usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+                    .sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+                    .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+            LongBuffer imageOut = stack.mallocLong(1);
+            check(vkCreateImage(device, info, null, imageOut), "vkCreateImage(texture)");
+            textureImage = imageOut.get(0);
+            VkMemoryRequirements requirements = VkMemoryRequirements.calloc(stack);
+            vkGetImageMemoryRequirements(device, textureImage, requirements);
+            VkMemoryAllocateInfo allocation = VkMemoryAllocateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+                    .allocationSize(requirements.size())
+                    .memoryTypeIndex(findMemoryType(requirements.memoryTypeBits(),
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+            LongBuffer memoryOut = stack.mallocLong(1);
+            check(vkAllocateMemory(device, allocation, null, memoryOut), "vkAllocateMemory(texture)");
+            textureMemory = memoryOut.get(0);
+            check(vkBindImageMemory(device, textureImage, textureMemory, 0), "vkBindImageMemory(texture)");
+        }
+    }
+
+    private void uploadTexture(long stagingBuffer) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkCommandBufferAllocateInfo allocate = VkCommandBufferAllocateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+                    .commandPool(commandPool)
+                    .level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+                    .commandBufferCount(1);
+            PointerBuffer handle = stack.mallocPointer(1);
+            check(vkAllocateCommandBuffers(device, allocate, handle), "allocate texture upload commands");
+            VkCommandBuffer commands = new VkCommandBuffer(handle.get(0), device);
+            try {
+                VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+                        .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+                check(vkBeginCommandBuffer(commands, begin), "begin texture upload");
+                VkImageSubresourceRange range = VkImageSubresourceRange.calloc(stack)
+                        .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                        .baseMipLevel(0).levelCount(1)
+                        .baseArrayLayer(0).layerCount(1);
+                VkImageMemoryBarrier.Buffer barriers = VkImageMemoryBarrier.calloc(1, stack);
+                VkImageMemoryBarrier barrier = barriers.get(0)
+                        .sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+                        .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+                        .dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+                        .image(textureImage)
+                        .subresourceRange(range)
+                        .srcAccessMask(0)
+                        .dstAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT)
+                        .oldLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+                        .newLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, null, null, barriers);
+
+                VkBufferImageCopy.Buffer copy = VkBufferImageCopy.calloc(1, stack);
+                copy.get(0).bufferOffset(0).bufferRowLength(0).bufferImageHeight(0);
+                copy.get(0).imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                        .mipLevel(0).baseArrayLayer(0).layerCount(1);
+                copy.get(0).imageOffset().set(0, 0, 0);
+                copy.get(0).imageExtent().set(TEXTURE_SIZE, TEXTURE_SIZE, 1);
+                vkCmdCopyBufferToImage(commands, stagingBuffer, textureImage,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, copy);
+
+                barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT)
+                        .dstAccessMask(VK_ACCESS_SHADER_READ_BIT)
+                        .oldLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+                        .newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, null, null, barriers);
+                check(vkEndCommandBuffer(commands), "end texture upload");
+
+                VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO)
+                        .pCommandBuffers(stack.pointers(commands.address()));
+                check(vkQueueSubmit(graphicsQueue, submit, VK_NULL_HANDLE), "submit texture upload");
+                // Upload only: the continuous frame loop never waits idle per frame.
+                check(vkQueueWaitIdle(graphicsQueue), "wait for texture upload");
+            } finally {
+                vkFreeCommandBuffers(device, commandPool, stack.pointers(commands.address()));
+            }
+        }
+    }
+
+    private void createTextureViewAndSampler() {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkImageSubresourceRange range = VkImageSubresourceRange.calloc(stack)
+                    .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                    .baseMipLevel(0).levelCount(1)
+                    .baseArrayLayer(0).layerCount(1);
+            VkImageViewCreateInfo view = VkImageViewCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
+                    .image(textureImage).viewType(VK_IMAGE_VIEW_TYPE_2D)
+                    .format(VK_FORMAT_R8G8B8A8_UNORM).subresourceRange(range);
+            LongBuffer viewOut = stack.mallocLong(1);
+            check(vkCreateImageView(device, view, null, viewOut), "vkCreateImageView(texture)");
+            textureView = viewOut.get(0);
+
+            VkSamplerCreateInfo sampler = VkSamplerCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
+                    .magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST)
+                    .mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                    .addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .maxLod(0.0f).minLod(0.0f)
+                    .anisotropyEnable(false).unnormalizedCoordinates(false);
+            LongBuffer samplerOut = stack.mallocLong(1);
+            check(vkCreateSampler(device, sampler, null, samplerOut), "vkCreateSampler");
+            textureSampler = samplerOut.get(0);
+        }
+    }
+
+    private void createTextureDescriptor() {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
+            poolSizes.get(0).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
+            VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO)
+                    .maxSets(1).pPoolSizes(poolSizes);
+            LongBuffer poolOut = stack.mallocLong(1);
+            check(vkCreateDescriptorPool(device, poolInfo, null, poolOut), "vkCreateDescriptorPool");
+            descriptorPool = poolOut.get(0);
+
+            VkDescriptorSetAllocateInfo allocation = VkDescriptorSetAllocateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO)
+                    .descriptorPool(descriptorPool)
+                    .pSetLayouts(stack.longs(descriptorLayout));
+            LongBuffer setOut = stack.mallocLong(1);
+            check(vkAllocateDescriptorSets(device, allocation, setOut), "vkAllocateDescriptorSets");
+            descriptorSet = setOut.get(0);
+
+            VkDescriptorImageInfo.Buffer image = VkDescriptorImageInfo.calloc(1, stack);
+            image.get(0).imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                    .imageView(textureView).sampler(textureSampler);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(1, stack);
+            writes.get(0).sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+                    .dstSet(descriptorSet).dstBinding(0).dstArrayElement(0)
+                    .descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).pImageInfo(image);
+            vkUpdateDescriptorSets(device, writes, null);
+        }
+    }
+
     private void recordFrameCommands(int imageIndex, float elapsedSeconds) {
         VkCommandBuffer commands = commandBuffers[imageIndex];
         // Only one GPU submission is in flight. The previous frame's fence is
@@ -609,11 +938,19 @@ public final class VulkanSmoke implements AutoCloseable {
                         .renderArea(rect)
                         .pClearValues(clear);
                 vkCmdBeginRenderPass(commands, render, VK_SUBPASS_CONTENTS_INLINE);
-                if (drawTriangle) {
-                    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
+                if (drawGeometry) {
+                    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
                     vkCmdPushConstants(commands, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                             0, stack.floats(elapsedSeconds));
-                    vkCmdDraw(commands, 3, 1, 0, 0);
+                    if (drawTexturedQuad) {
+                        vkCmdBindVertexBuffers(commands, 0, stack.longs(vertexBuffer), stack.longs(0));
+                        vkCmdBindIndexBuffer(commands, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                        vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout, 0, stack.longs(descriptorSet), null);
+                        vkCmdDrawIndexed(commands, 6, 1, 0, 0, 0);
+                    } else {
+                        vkCmdDraw(commands, 3, 1, 0, 0);
+                    }
                 }
                 vkCmdEndRenderPass(commands);
             }
@@ -679,7 +1016,7 @@ public final class VulkanSmoke implements AutoCloseable {
     }
 
     private void runFrames() {
-        System.out.println("[loop] " + (animateTriangle ? "Continuous animation" : "Single-frame diagnostic")
+        System.out.println("[loop] " + (animate ? "Continuous animation" : "Single-frame diagnostic")
                 + " started. Press Escape to exit.");
         long startNanos = System.nanoTime();
         long reportNanos = startNanos;
@@ -689,11 +1026,11 @@ public final class VulkanSmoke implements AutoCloseable {
             glfwPollEvents();
             if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) break;
 
-            float elapsedSeconds = animateTriangle
+            float elapsedSeconds = animate
                     ? (System.nanoTime() - startNanos) / 1_000_000_000.0f : 0.0f;
             if (!drawFrame(++frameNumber, elapsedSeconds)) break;
 
-            if (!animateTriangle) {
+            if (!animate) {
                 // Both legacy diagnostics intentionally show just one image.
                 // The active animation path is the separate multi-frame test.
                 System.out.println("[display] One diagnostic frame queued; waiting for window events.");
@@ -743,7 +1080,8 @@ public final class VulkanSmoke implements AutoCloseable {
             }
             int imageIndex = acquired.get(0);
             if (firstFrame) System.out.println("[frame 1] Acquired image " + imageIndex
-                    + "; recording and submitting Vulkan " + (drawTriangle ? "triangle" : "clear") + "...");
+                    + "; recording and submitting Vulkan "
+                    + (drawTexturedQuad ? "textured quad" : drawTriangle ? "triangle" : "clear") + "...");
 
             recordFrameCommands(imageIndex, elapsedSeconds);
 
@@ -811,7 +1149,17 @@ public final class VulkanSmoke implements AutoCloseable {
                     if (imageView != 0) vkDestroyImageView(device, imageView, null);
                 }
             }
-            if (trianglePipeline != 0) vkDestroyPipeline(device, trianglePipeline, null);
+            if (graphicsPipeline != 0) vkDestroyPipeline(device, graphicsPipeline, null);
+            if (descriptorPool != 0) vkDestroyDescriptorPool(device, descriptorPool, null);
+            if (descriptorLayout != 0) vkDestroyDescriptorSetLayout(device, descriptorLayout, null);
+            if (textureSampler != 0) vkDestroySampler(device, textureSampler, null);
+            if (textureView != 0) vkDestroyImageView(device, textureView, null);
+            if (textureImage != 0) vkDestroyImage(device, textureImage, null);
+            if (textureMemory != 0) vkFreeMemory(device, textureMemory, null);
+            if (indexBuffer != 0) vkDestroyBuffer(device, indexBuffer, null);
+            if (indexMemory != 0) vkFreeMemory(device, indexMemory, null);
+            if (vertexBuffer != 0) vkDestroyBuffer(device, vertexBuffer, null);
+            if (vertexMemory != 0) vkFreeMemory(device, vertexMemory, null);
             if (pipelineLayout != 0) vkDestroyPipelineLayout(device, pipelineLayout, null);
             if (renderPass != 0) vkDestroyRenderPass(device, renderPass, null);
             if (swapchain != 0) vkDestroySwapchainKHR(device, swapchain, null);
