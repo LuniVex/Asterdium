@@ -3,7 +3,7 @@
 **Asterdium** is LuniVex's independent, experimental Minecraft renderer project.
 It is intended to become an original Vulkan renderer, developed incrementally.
 
-## Current status: 0.0.4 experimental research
+## Current status: 0.0.5 experimental research
 
 This is **not yet a usable Minecraft Vulkan renderer**. The project contains:
 
@@ -13,9 +13,9 @@ This is **not yet a usable Minecraft Vulkan renderer**. The project contains:
 4. Eight self-checks for geometry counts, face winding, determinism and section boundaries.
 5. A separate LWJGL 3.4 standalone Windows Vulkan experiment (`VulkanSmoke/`).
    The **0.0.2 clear and 0.0.3 multicolor triangle both rendered on Star's
-   RTX 3060**. The new **0.0.4 experiment** uses a per-frame push constant,
-   re-recorded command buffers, and a continuous animation loop (not yet
-   validated on that GPU).
+   RTX 3060**, as did the continuously rotating 0.0.4 triangle. The new
+   **0.0.5 experiment** adds an indexed quad and a generated pixel texture
+   uploaded into a sampled Vulkan image (pending RTX 3060 validation).
 
 The standalone experiment has a Vulkan logical device, swapchain, and
 presentation, but **does not render Minecraft**, upload chunk meshes, or
@@ -60,8 +60,8 @@ Run this early diagnostic in a **separate test instance without another Vulkan m
 
 ## Next milestones
 
-1. **Animated Vulkan triangle**: `VulkanSmoke/` contains the 0.0.4 multi-frame experiment. Run `Run-Vulkan-Smoke-Windows.cmd` on Windows. The proven 0.0.3 triangle and 0.0.2 teal clear remain available via `ASTERDIUM_RENDER_MODE=static` or `clear` for regression testing.
-2. **Geometry upload**: staging memory and vertex/index buffers for the mesher's geometry.
+1. **Textured Vulkan geometry**: `VulkanSmoke/` contains the 0.0.5 rotating indexed quad and an original sampled pixel texture. Run `Run-Vulkan-Smoke-Windows.cmd` on Windows. Earlier modes remain available as `triangle`, `static`, or `clear` for regression testing.
+2. **Chunk geometry upload**: upload the CPU mesher's geometry and build a block texture atlas.
 3. **Minecraft bridge**: design a compatible replacement for the game's OpenGL window creation and renderer, opt-in only, preserving a reversible OpenGL launch path.
 4. **Feature completeness**: block states, block atlas, lighting, fluids, transparent blocks, entities, GUI, particles, shader/resource-pack support, mod compatibility.
 5. **Benchmarks**: repeatable results on Star's RTX 3060/i9 and future RTX 5080/Ryzen 9900X; verify FPS, 1% lows and GPU/CPU frametimes.
@@ -75,5 +75,5 @@ This public repository contains original Asterdium code and uses Fabric/LWJGL as
 The initial source bundle was prepared in a runtime without Gradle or the LWJGL/Fabric/Minecraft dependencies available. The geometry test was compiled and executed using Java 21, but a complete Fabric mod build and live Vulkan GPU probe have **not** been run in that environment. The Windows build script is provided for that validation.
 
 The standalone Vulkan experiment is described in `VulkanSmoke/README.md`.
-The 0.0.2 clear and 0.0.3 triangle both displayed successfully on Star's RTX
-3060; the new 0.0.4 animation still needs an on-device test.
+The 0.0.2 clear, 0.0.3 triangle and 0.0.4 animation all displayed successfully
+on Star's RTX 3060; 0.0.5's indexed textured quad still needs an on-device test.
