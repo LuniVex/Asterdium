@@ -7,9 +7,9 @@ if (!(Test-Path -LiteralPath $gradle)) {
 }
 
 $smokeProject = Join-Path $PSScriptRoot 'VulkanSmoke'
-Write-Host 'Starting Asterdium 0.0.3 standalone Vulkan triangle...'
+Write-Host 'Starting Asterdium 0.0.4 standalone animated Vulkan triangle...'
 Write-Host 'This is NOT Minecraft and will not modify any Fabric instance.'
-Write-Host 'Set ASTERDIUM_RENDER_MODE=clear to run the original teal clear-only diagnostic.'
+Write-Host 'Set ASTERDIUM_RENDER_MODE=static for the proven 0.0.3 triangle, or clear for the original teal test.'
 Write-Host 'Close the test window or press Escape to exit.'
 
 & $gradle --no-daemon --console plain --project-dir $smokeProject run
