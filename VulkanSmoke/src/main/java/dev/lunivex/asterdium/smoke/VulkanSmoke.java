@@ -362,6 +362,9 @@ public final class VulkanSmoke implements AutoCloseable {
             color.get(0).attachment(0).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             VkSubpassDescription.Buffer subpasses = VkSubpassDescription.calloc(1, stack);
             subpasses.get(0).pipelineBindPoint(VK_PIPELINE_BIND_POINT_GRAPHICS)
+                    // LWJGL does not derive this count from pColorAttachments.
+                    // Without it, the subpass writes no color attachment at all.
+                    .colorAttachmentCount(1)
                     .pColorAttachments(color);
             VkSubpassDependency.Buffer dependency = VkSubpassDependency.calloc(1, stack);
             dependency.get(0)
@@ -463,6 +466,8 @@ public final class VulkanSmoke implements AutoCloseable {
                 scissor.get(0).extent().set(swapchainWidth, swapchainHeight);
                 VkPipelineViewportStateCreateInfo viewportState = VkPipelineViewportStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO)
+                        .viewportCount(1)
+                        .scissorCount(1)
                         .pViewports(viewport).pScissors(scissor);
 
                 VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.calloc(stack)
@@ -479,6 +484,7 @@ public final class VulkanSmoke implements AutoCloseable {
                         | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
                 VkPipelineColorBlendStateCreateInfo blending = VkPipelineColorBlendStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO)
+                        .attachmentCount(1)
                         .pAttachments(blendAttachment);
 
                 VkGraphicsPipelineCreateInfo.Buffer pipelineInfo = VkGraphicsPipelineCreateInfo.calloc(1, stack);
