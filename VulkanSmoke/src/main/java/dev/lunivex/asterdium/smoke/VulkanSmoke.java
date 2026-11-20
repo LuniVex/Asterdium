@@ -53,7 +53,7 @@ public final class VulkanSmoke implements AutoCloseable {
                 vec2 position = positions[gl_VertexIndex];
                 vec2 rotated = vec2(position.x * c - position.y * s,
                                     position.x * s + position.y * c);
-                gl_Position = vec4(rotated * 0.8, 0.0, 1.0);
+                gl_Position = vec4(rotated, 0.0, 1.0);
                 vertexColor = colors[gl_VertexIndex];
             }
             """;
@@ -708,7 +708,7 @@ public final class VulkanSmoke implements AutoCloseable {
             long now = System.nanoTime();
             if (now - reportNanos >= 1_000_000_000L) {
                 double interval = (now - reportNanos) / 1_000_000_000.0;
-                System.out.printf("[loop] %.1f presented frames/sec (%d total)%n",
+                System.out.printf("[loop] %.1f frames queued/sec (%d total)%n",
                         framesSinceReport / interval, frameNumber);
                 reportNanos = now;
                 framesSinceReport = 0;
