@@ -543,8 +543,7 @@ public final class VulkanSmoke implements AutoCloseable {
                     VkVertexInputAttributeDescription.Buffer attributes = VkVertexInputAttributeDescription.calloc(2, stack);
                     attributes.get(0).location(0).binding(0).format(VK_FORMAT_R32G32_SFLOAT).offset(0);
                     attributes.get(1).location(1).binding(0).format(VK_FORMAT_R32G32_SFLOAT).offset(2 * Float.BYTES);
-                    vertexInput.pVertexBindingDescriptions(bindings).pVertexAttributeDescriptions(attributes)
-                            .vertexBindingDescriptionCount(1).vertexAttributeDescriptionCount(2);
+                    vertexInput.pVertexBindingDescriptions(bindings).pVertexAttributeDescriptions(attributes);
                 }
                 VkPipelineInputAssemblyStateCreateInfo assembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO)
