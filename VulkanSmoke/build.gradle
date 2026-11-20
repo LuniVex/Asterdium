@@ -14,9 +14,12 @@ dependencies {
     implementation "org.lwjgl:lwjgl:${lwjglVersion}"
     implementation "org.lwjgl:lwjgl-glfw:${lwjglVersion}"
     implementation "org.lwjgl:lwjgl-vulkan:${lwjglVersion}"
+    // Compile the triangle's GLSL shaders to SPIR-V at startup.
+    implementation "org.lwjgl:lwjgl-shaderc:${lwjglVersion}"
 
     runtimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
     runtimeOnly "org.lwjgl:lwjgl-glfw:${lwjglVersion}:natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-shaderc:${lwjglVersion}:natives-windows"
 }
 
 application {
