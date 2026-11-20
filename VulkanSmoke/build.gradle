@@ -1,0 +1,36 @@
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+// LWJGL 3.4.0 fixes a Vulkan VkInstance extension-enumeration stack OOME
+// affecting recent GPU drivers. Kept isolated from Minecraft's LWJGL version.
+def lwjglVersion = '3.4.0'
+
+dependencies {
+    implementation "org.lwjgl:lwjgl:${lwjglVersion}"
+    implementation "org.lwjgl:lwjgl-glfw:${lwjglVersion}"
+    implementation "org.lwjgl:lwjgl-vulkan:${lwjglVersion}"
+
+    runtimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-glfw:${lwjglVersion}:natives-windows"
+}
+
+application {
+    mainClass = 'dev.lunivex.asterdium.smoke.VulkanSmoke'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('run', JavaExec) {
+    workingDir = rootProject.projectDir
+    standardInput = System.in
+    // This is a native LWJGL allocation stack size in KiB, not Java -Xss.
+    systemProperty 'org.lwjgl.system.stackSize', '1024'
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "asterdium",
+  "version": "${version}",
+  "name": "Asterdium",
+  "description": "Experimental LuniVex Vulkan rendering research. OpenGL remains the active Minecraft renderer.",
+  "authors": ["LuniVex"],
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.lunivex.asterdium.AsterdiumClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "1.21.1",
+    "java": ">=21"
+  }
+}
